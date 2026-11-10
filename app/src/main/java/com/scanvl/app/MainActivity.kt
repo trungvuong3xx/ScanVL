@@ -203,7 +203,7 @@ class MainActivity : ComponentActivity() {
 
             try {
                 val pdf = scanningResult.pdf
-                val pages = scanningResult.pages
+                val pages = scanningResult.pages.orEmpty()
 
                 if (pdf == null) {
                     withContext(Dispatchers.Main) {
