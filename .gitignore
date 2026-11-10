@@ -13,3 +13,8 @@
 .externalNativeBuild
 .cxx
 local.properties
+
+# Keystore ký app - KHÔNG commit
+*.jks
+*.keystore
+keystore.properties

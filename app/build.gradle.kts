@@ -3,16 +3,34 @@ plugins {
     id("org.jetbrains.kotlin.android")
 }
 
+// Số build tăng dần trên GitHub Actions -> mỗi APK mới cài đè (update) lên bản cũ được
+val ciBuildNumber: Int = System.getenv("GITHUB_RUN_NUMBER")?.toIntOrNull() ?: 1
+
+// Thông tin keystore ký bản Release (lấy từ biến môi trường / GitHub Secrets)
+val releaseKeystorePath: String? = System.getenv("KEYSTORE_PATH")
+val hasReleaseKeystore: Boolean = releaseKeystorePath != null && file(releaseKeystorePath).exists()
+
 android {
     namespace = "com.scanvl.app"
     compileSdk = 34
+
+    signingConfigs {
+        create("release") {
+            if (hasReleaseKeystore) {
+                storeFile = file(releaseKeystorePath!!)
+                storePassword = System.getenv("KEYSTORE_PASSWORD")
+                keyAlias = System.getenv("KEY_ALIAS")
+                keyPassword = System.getenv("KEY_PASSWORD")
+            }
+        }
+    }
 
     defaultConfig {
         applicationId = "com.scanvl.app"
         minSdk = 24
         targetSdk = 34
-        versionCode = 1
-        versionName = "1.0.0"
+        versionCode = ciBuildNumber
+        versionName = "1.0.$ciBuildNumber"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
         vectorDrawables {
@@ -22,7 +40,15 @@ android {
 
     buildTypes {
         release {
-            isMinifyEnabled = false
+            // R8: thu gọn + tối ưu code -> APK nhẹ, chạy mượt hơn bản debug rất nhiều
+            isMinifyEnabled = true
+            isShrinkResources = true
+            // Có keystore thì ký bằng keystore riêng, không có thì tạm ký bằng debug key để vẫn cài được
+            signingConfig = if (hasReleaseKeystore) {
+                signingConfigs.getByName("release")
+            } else {
+                signingConfigs.getByName("debug")
+            }
             proguardFiles(
                 getDefaultProguardFile("proguard-android-optimize.txt"),
                 "proguard-rules.pro"
@@ -81,7 +107,7 @@ dependencies {
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.8.1")
 
     // Gson để lưu trữ metadata tài liệu Scoped Storage
-    implementation("com.google.code.gson:gson:2.10.1")
+    implementation("com.google.code.gson:gson:2.11.0")
 
     // Debugging Compose Tooling
     debugImplementation("androidx.compose.ui:ui-tooling")
