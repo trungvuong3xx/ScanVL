@@ -1,10 +1,7 @@
 <?xml version="1.0" encoding="utf-8"?>
-<paths xmlns:android="http://schemas.android.com/apk/res/android">
-    <!-- Cho phép chia sẻ file PDF và Thumbnail lưu trong thư mục Documents của app -->
-    <external-files-path
-        name="scanned_docs"
-        path="Documents/ScanVL/" />
-    <files-path
-        name="internal_docs"
-        path="scans/" />
+<paths>
+    <!-- Chỉ chia sẻ thư mục tạm chứa PDF/ảnh vừa xuất để gửi đi -->
+    <cache-path
+        name="share"
+        path="share/" />
 </paths>
