@@ -86,7 +86,10 @@ import androidx.compose.ui.viewinterop.AndroidView
 import androidx.core.content.ContextCompat
 import coil.compose.AsyncImage
 import com.scanvl.app.data.CapturedPhoto
+import com.scanvl.app.data.DocumentStore
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import java.io.File
 import java.text.SimpleDateFormat
 import java.util.Date
@@ -155,6 +158,10 @@ fun CameraScannerScreen(
     }
 
     // State Camera & Sensor
+    val store = remember { DocumentStore(context) }
+    var isShutterSoundEnabled by remember { mutableStateOf(store.isShutterSoundEnabled) }
+    var isAutoCropEnabled by remember { mutableStateOf(store.isAutoCropEnabled) }
+
     val levelState by rememberDeviceLevel()
     var scanTab by remember { mutableStateOf(initialTab) }
     var flashMode by remember { mutableStateOf(CameraFlashMode.OFF) }
@@ -283,7 +290,21 @@ fun CameraScannerScreen(
             onToggleHd = { isHdMode = !isHdMode },
             onToggleMoreMenu = { showMoreMenu = !showMoreMenu },
             showLevelIndicator = showLevelIndicator,
-            onToggleLevel = { showLevelIndicator = !showLevelIndicator }
+            onToggleLevel = { showLevelIndicator = !showLevelIndicator },
+            isShutterSoundEnabled = isShutterSoundEnabled,
+            onToggleSound = {
+                val next = !isShutterSoundEnabled
+                isShutterSoundEnabled = next
+                store.isShutterSoundEnabled = next
+                Toast.makeText(context, if (next) "Âm thanh chụp: Bật" else "Âm thanh chụp: Đã tắt (Im lặng)", Toast.LENGTH_SHORT).show()
+            },
+            isAutoCropEnabled = isAutoCropEnabled,
+            onToggleAutoCrop = {
+                val next = !isAutoCropEnabled
+                isAutoCropEnabled = next
+                store.isAutoCropEnabled = next
+                Toast.makeText(context, if (next) "Tự động cắt viền: Bật" else "Tự động cắt viền: Tắt (Giữ toàn khung)", Toast.LENGTH_SHORT).show()
+            }
         )
 
         // 5. BOTTOM CONTROLS: Mode [Chụp đơn | Hàng loạt], Shutter, Thumbnail [Sửa đổi], Nút [Hoàn thành]
@@ -298,9 +319,11 @@ fun CameraScannerScreen(
                 if (isShooting) return@BottomControlsBar
                 isShooting = true
 
-                // Chớp animation
+                // Chớp animation & âm thanh (nếu bật)
                 scope.launch {
-                    sound.play(MediaActionSound.SHUTTER_CLICK)
+                    if (isShutterSoundEnabled) {
+                        sound.play(MediaActionSound.SHUTTER_CLICK)
+                    }
                     haptic.performHapticFeedback(HapticFeedbackType.LongPress)
                     shutterButtonScale.animateTo(0.85f, tween(80))
                     shutterButtonScale.animateTo(1f, tween(100))
@@ -310,19 +333,26 @@ fun CameraScannerScreen(
                     shutterFlashAlpha.animateTo(0f, tween(200))
                 }
 
-                // Chụp và lưu ảnh vào cache session
+                // Chụp và lưu ảnh vào cache session (tự động cắt viền nếu bật)
                 takePhoto(
                     context = context,
                     imageCapture = imageCapture,
                     onSuccess = { file ->
-                        val item = CapturedPhoto(file = file)
-                        capturedPhotos.add(item)
-                        isShooting = false
+                        scope.launch(Dispatchers.Default) {
+                            if (isAutoCropEnabled) {
+                                DocumentCropper.cropFile(file)
+                            }
+                            withContext(Dispatchers.Main) {
+                                val item = CapturedPhoto(file = file)
+                                capturedPhotos.add(item)
+                                isShooting = false
 
-                        // Nếu là chế độ chụp đơn: mở ngay màn hình xem lại / hoàn thành
-                        if (scanTab == CameraScanTab.SINGLE) {
-                            reviewStartIndex = capturedPhotos.size - 1
-                            isReviewing = true
+                                // Nếu là chế độ chụp đơn: mở ngay màn hình xem lại / hoàn thành
+                                if (scanTab == CameraScanTab.SINGLE) {
+                                    reviewStartIndex = capturedPhotos.size - 1
+                                    isReviewing = true
+                                }
+                            }
                         }
                     },
                     onError = {
@@ -346,7 +376,7 @@ fun CameraScannerScreen(
         )
     }
 
-    // 6. Dialog Xem ảnh vừa chụp, Sửa hoặc Xóa
+    // 6. Dialog Xem ảnh vừa chụp, Sửa (Xoay, Cắt viền) hoặc Xóa
     if (isReviewing && capturedPhotos.isNotEmpty()) {
         SessionReviewDialog(
             photos = capturedPhotos,
@@ -355,6 +385,16 @@ fun CameraScannerScreen(
             onRotate = { idx ->
                 val cur = capturedPhotos[idx]
                 capturedPhotos[idx] = cur.copy(rotation = (cur.rotation + 90) % 360)
+            },
+            onCrop = { idx ->
+                val cur = capturedPhotos[idx]
+                scope.launch(Dispatchers.Default) {
+                    DocumentCropper.cropFile(cur.file)
+                    withContext(Dispatchers.Main) {
+                        capturedPhotos[idx] = cur.copy(id = UUID.randomUUID().toString())
+                        Toast.makeText(context, "Đã tự động cắt và nắn phẳng tài liệu trang ${idx + 1}", Toast.LENGTH_SHORT).show()
+                    }
+                }
             },
             onDelete = { idx ->
                 val removed = capturedPhotos.removeAt(idx)
@@ -476,11 +516,15 @@ private fun TopCameraBar(
     isHdMode: Boolean,
     showMoreMenu: Boolean,
     showLevelIndicator: Boolean,
+    isShutterSoundEnabled: Boolean,
+    isAutoCropEnabled: Boolean,
     onClose: () -> Unit,
     onToggleFlash: () -> Unit,
     onToggleHd: () -> Unit,
     onToggleMoreMenu: () -> Unit,
-    onToggleLevel: () -> Unit
+    onToggleLevel: () -> Unit,
+    onToggleSound: () -> Unit,
+    onToggleAutoCrop: () -> Unit
 ) {
     Row(
         modifier = Modifier
@@ -532,14 +576,34 @@ private fun TopCameraBar(
             // More Menu (...)
             Box {
                 IconButton(onClick = onToggleMoreMenu) {
-                    Icon(Icons.Default.MoreVert, contentDescription = "Thêm", tint = Color.White)
+                    Icon(Icons.Default.MoreVert, contentDescription = "Cài đặt máy ảnh", tint = Color.White)
                 }
                 DropdownMenu(
                     expanded = showMoreMenu,
                     onDismissRequest = onToggleMoreMenu
                 ) {
                     DropdownMenuItem(
-                        text = { Text(if (showLevelIndicator) "Tắt cân bằng điện thoại" else "Bật cân bằng điện thoại") },
+                        text = {
+                            Text(if (isShutterSoundEnabled) "🔊 Âm thanh khi chụp: Bật" else "🔇 Âm thanh khi chụp: Đã tắt")
+                        },
+                        onClick = {
+                            onToggleSound()
+                            onToggleMoreMenu()
+                        }
+                    )
+                    DropdownMenuItem(
+                        text = {
+                            Text(if (isAutoCropEnabled) "✂️ Tự động cắt tài liệu: Bật" else "✂️ Tự động cắt tài liệu: Tắt")
+                        },
+                        onClick = {
+                            onToggleAutoCrop()
+                            onToggleMoreMenu()
+                        }
+                    )
+                    DropdownMenuItem(
+                        text = {
+                            Text(if (showLevelIndicator) "🎯 Cân bằng điện thoại: Bật" else "🎯 Cân bằng điện thoại: Tắt")
+                        },
                         onClick = {
                             onToggleLevel()
                             onToggleMoreMenu()

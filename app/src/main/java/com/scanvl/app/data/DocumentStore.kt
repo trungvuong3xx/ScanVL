@@ -45,11 +45,19 @@ class DocumentStore(context: Context) {
     fun pageFile(docId: String, page: ScanPage): File = File(File(docsRoot, docId), page.fileName)
 
     // ---------------------------------------------------------------------
-    // Tùy chọn người dùng (Mở thẳng camera, mức nén PDF/Ảnh)
+    // Tùy chọn người dùng (Mở thẳng camera, mức nén, âm thanh, tự cắt)
     // ---------------------------------------------------------------------
     var autoLaunchCamera: Boolean
         get() = prefs.getBoolean(KEY_AUTO_CAMERA, true)
         set(value) = prefs.edit().putBoolean(KEY_AUTO_CAMERA, value).apply()
+
+    var isShutterSoundEnabled: Boolean
+        get() = prefs.getBoolean(KEY_SHUTTER_SOUND, false)
+        set(value) = prefs.edit().putBoolean(KEY_SHUTTER_SOUND, value).apply()
+
+    var isAutoCropEnabled: Boolean
+        get() = prefs.getBoolean(KEY_AUTO_CROP, true)
+        set(value) = prefs.edit().putBoolean(KEY_AUTO_CROP, value).apply()
 
     var exportQuality: ExportQuality
         get() = prefs.getString(KEY_QUALITY, null)?.let { name ->
@@ -326,6 +334,8 @@ class DocumentStore(context: Context) {
         const val TRASH_RETENTION_DAYS = 30
         const val TRASH_RETENTION_MS = TRASH_RETENTION_DAYS * 24L * 3600L * 1000L
         private const val KEY_AUTO_CAMERA = "auto_launch_camera"
+        private const val KEY_SHUTTER_SOUND = "shutter_sound_enabled"
+        private const val KEY_AUTO_CROP = "auto_crop_enabled"
         private const val KEY_QUALITY = "export_quality"
 
         fun safeFileName(title: String): String =

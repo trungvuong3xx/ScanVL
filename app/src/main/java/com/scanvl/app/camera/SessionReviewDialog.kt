@@ -29,6 +29,7 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.Check
+import androidx.compose.material.icons.filled.Crop
 import androidx.compose.material.icons.filled.DeleteOutline
 import androidx.compose.material.icons.filled.Rotate90DegreesCw
 import androidx.compose.material3.Button
@@ -72,6 +73,7 @@ fun SessionReviewDialog(
     initialIndex: Int = 0,
     onDismiss: () -> Unit,
     onRotate: (Int) -> Unit,
+    onCrop: (Int) -> Unit,
     onDelete: (Int) -> Unit,
     onFinish: () -> Unit
 ) {
@@ -176,12 +178,12 @@ fun SessionReviewDialog(
                     }
                 }
 
-                // Thanh nút hành động nhanh cho trang đang chọn: Xoay 90° & Xóa
+                // Thanh nút hành động nhanh cho trang đang chọn: Xoay 90°, Cắt viền & Xóa
                 if (currentPhoto != null) {
                     Row(
                         modifier = Modifier
                             .fillMaxWidth()
-                            .padding(horizontal = 24.dp, vertical = 6.dp),
+                            .padding(horizontal = 16.dp, vertical = 6.dp),
                         horizontalArrangement = Arrangement.SpaceEvenly,
                         verticalAlignment = Alignment.CenterVertically
                     ) {
@@ -190,8 +192,17 @@ fun SessionReviewDialog(
                             shape = RoundedCornerShape(12.dp)
                         ) {
                             Icon(Icons.Default.Rotate90DegreesCw, contentDescription = null)
-                            Spacer(Modifier.width(6.dp))
-                            Text("Xoay 90°")
+                            Spacer(Modifier.width(4.dp))
+                            Text("Xoay")
+                        }
+
+                        FilledTonalButton(
+                            onClick = { onCrop(currentIndex) },
+                            shape = RoundedCornerShape(12.dp)
+                        ) {
+                            Icon(Icons.Default.Crop, contentDescription = null)
+                            Spacer(Modifier.width(4.dp))
+                            Text("Cắt viền")
                         }
 
                         FilledTonalButton(
@@ -203,8 +214,8 @@ fun SessionReviewDialog(
                             )
                         ) {
                             Icon(Icons.Default.DeleteOutline, contentDescription = null)
-                            Spacer(Modifier.width(6.dp))
-                            Text("Xóa trang")
+                            Spacer(Modifier.width(4.dp))
+                            Text("Xóa")
                         }
                     }
                 }
