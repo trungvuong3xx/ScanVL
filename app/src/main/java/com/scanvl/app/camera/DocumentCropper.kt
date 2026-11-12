@@ -14,6 +14,7 @@ import java.io.FileOutputStream
 import kotlin.math.abs
 import kotlin.math.hypot
 import kotlin.math.max
+import kotlin.math.min
 import kotlin.math.roundToInt
 
 data class DocumentCorners(
@@ -61,131 +62,206 @@ data class DocumentCornersNorm(
 object DocumentCropper {
 
     /**
-     * Tự động phát hiện 4 góc tài liệu trên mặt bàn.
-     * Quét từ 4 mép ảnh vào tâm để tìm vùng có độ tương phản/độ sáng khác biệt của tờ giấy.
+     * Tự động phát hiện 4 góc tài liệu trên ảnh gốc.
      */
     fun detectCorners(bitmap: Bitmap): DocumentCorners {
+        val norm = detectCornersNorm(bitmap)
+        val w = bitmap.width.toFloat()
+        val h = bitmap.height.toFloat()
+        return DocumentCorners(
+            topLeft = PointF(norm.topLeft.x * w, norm.topLeft.y * h),
+            topRight = PointF(norm.topRight.x * w, norm.topRight.y * h),
+            bottomRight = PointF(norm.bottomRight.x * w, norm.bottomRight.y * h),
+            bottomLeft = PointF(norm.bottomLeft.x * w, norm.bottomLeft.y * h)
+        )
+    }
+
+    /**
+     * Nhận diện 4 góc tài liệu thông minh (Otsu Binarization + Đa giác cực trị 4 góc):
+     * - Tự động thích ứng với bàn gỗ, bàn đen, bàn phím, văn bản nghiêng/xoay.
+     * - Trả về 4 góc chuẩn hóa (0f..1f) và cờ [isDetected] báo hiệu khóa viền thành công.
+     */
+    fun detectCornersNorm(bitmap: Bitmap): DocumentCornersNorm {
         val w = bitmap.width
         val h = bitmap.height
 
-        // Thu nhỏ để phân tích nhanh
-        val scale = 320f / max(w, h)
-        val sw = (w * scale).roundToInt().coerceAtLeast(10)
-        val sh = (h * scale).roundToInt().coerceAtLeast(10)
+        // Thu nhỏ về kích thước chuẩn ~180x240 để xử lý trong < 8ms
+        val scale = 240f / max(w, h)
+        val sw = (w * scale).roundToInt().coerceAtLeast(20)
+        val sh = (h * scale).roundToInt().coerceAtLeast(20)
         val small = Bitmap.createScaledBitmap(bitmap, sw, sh, false)
 
         val pixels = IntArray(sw * sh)
         small.getPixels(pixels, 0, sw, 0, 0, sw, sh)
         small.recycle()
 
-        // Tính độ sáng (Luminance) từng pixel
+        // Tính Luminance và xây dựng biểu đồ Histogram
         val lums = IntArray(pixels.size)
+        val hist = IntArray(256)
         for (i in pixels.indices) {
             val c = pixels[i]
             val r = (c shr 16) and 0xFF
             val g = (c shr 8) and 0xFF
             val b = c and 0xFF
-            lums[i] = (r * 299 + g * 587 + b * 114) / 1000
+            val lum = (r * 299 + g * 587 + b * 114) / 1000
+            lums[i] = lum
+            hist[lum]++
         }
 
-        // Tìm mép từ 4 phía (trên, dưới, trái, phải)
+        // 1. Thuật toán Otsu tìm ngưỡng sáng tối ưu phân tách giấy và nền
+        val total = pixels.size.toFloat()
+        var sum = 0f
+        for (i in 0..255) sum += i * hist[i]
+
+        var sumB = 0f
+        var wB = 0f
+        var maxVar = 0f
+        var threshold = 128
+
+        for (t in 0..255) {
+            wB += hist[t]
+            if (wB == 0f) continue
+            val wF = total - wB
+            if (wF == 0f) break
+
+            sumB += t * hist[t]
+            val mB = sumB / wB
+            val mF = (sum - sumB) / wF
+            val betweenVar = wB * wF * (mB - mF) * (mB - mF)
+            if (betweenVar > maxVar) {
+                maxVar = betweenVar
+                threshold = t
+            }
+        }
+
         fun lumAt(x: Int, y: Int): Int = lums[y.coerceIn(0, sh - 1) * sw + x.coerceIn(0, sw - 1)]
 
-        var topY = 0
-        var bottomY = sh - 1
-        var leftX = 0
-        var rightX = sw - 1
+        // 2. Xác định xem giấy sáng hơn nền hay nền sáng hơn giấy (dựa vào viền ảnh)
+        var borderLumSum = 0L
+        var borderCount = 0
+        for (x in 0 until sw) {
+            borderLumSum += lumAt(x, 0) + lumAt(x, sh - 1)
+            borderCount += 2
+        }
+        for (y in 1 until sh - 1) {
+            borderLumSum += lumAt(0, y) + lumAt(sw - 1, y)
+            borderCount += 2
+        }
+        val borderMean = (borderLumSum / borderCount).toInt()
+        val isPaperBright = borderMean < threshold
 
-        val thresholdDiff = 25
-
-        // Quét mép trên
-        for (y in (sh * 0.05).toInt() until (sh * 0.45).toInt()) {
-            var diffSum = 0
-            for (x in (sw * 0.2).toInt()..(sw * 0.8).toInt() step 4) {
-                diffSum += abs(lumAt(x, y + 2) - lumAt(x, y - 2))
-            }
-            if (diffSum / ((sw * 0.6) / 4) > thresholdDiff) {
-                topY = y
-                break
+        // 3. Tính trọng tâm (Centroid) của vùng nghi vấn là tờ giấy
+        var sumX = 0L
+        var sumY = 0L
+        var count = 0
+        for (y in 0 until sh) {
+            for (x in 0 until sw) {
+                val lum = lumAt(x, y)
+                val match = if (isPaperBright) lum >= threshold else lum < threshold
+                if (match) {
+                    sumX += x
+                    sumY += y
+                    count++
+                }
             }
         }
 
-        // Quét mép dưới
-        for (y in (sh * 0.95).toInt() downTo (sh * 0.55).toInt()) {
-            var diffSum = 0
-            for (x in (sw * 0.2).toInt()..(sw * 0.8).toInt() step 4) {
-                diffSum += abs(lumAt(x, y - 2) - lumAt(x, y + 2))
-            }
-            if (diffSum / ((sw * 0.6) / 4) > thresholdDiff) {
-                bottomY = y
-                break
+        val totalPixels = sw * sh
+        // Nếu số điểm quá ít (< 10%) hoặc quá nhiều (> 92%) -> không có tài liệu rõ ràng trong khung hình
+        if (count < totalPixels * 0.10f || count > totalPixels * 0.92f) {
+            return DocumentCornersNorm.defaultGuide()
+        }
+
+        val cx = sumX.toFloat() / count
+        val cy = sumY.toFloat() / count
+
+        // 4. Tìm 4 góc cực trị theo phép chiếu đường chéo (Diagonal Projection) từ trọng tâm
+        class CornerCandidate(val score: Float, val x: Float, val y: Float)
+
+        val topTL = ArrayList<CornerCandidate>(8)
+        val topTR = ArrayList<CornerCandidate>(8)
+        val topBR = ArrayList<CornerCandidate>(8)
+        val topBL = ArrayList<CornerCandidate>(8)
+
+        fun updateCandidate(list: ArrayList<CornerCandidate>, score: Float, x: Float, y: Float) {
+            if (list.size < 6) {
+                list.add(CornerCandidate(score, x, y))
+                list.sortByDescending { it.score }
+            } else if (score > list.last().score) {
+                list[list.lastIndex] = CornerCandidate(score, x, y)
+                list.sortByDescending { it.score }
             }
         }
 
-        // Quét mép trái
-        for (x in (sw * 0.05).toInt() until (sw * 0.45).toInt()) {
-            var diffSum = 0
-            for (y in (sh * 0.2).toInt()..(sh * 0.8).toInt() step 4) {
-                diffSum += abs(lumAt(x + 2, y) - lumAt(x - 2, y))
-            }
-            if (diffSum / ((sh * 0.6) / 4) > thresholdDiff) {
-                leftX = x
-                break
-            }
-        }
-
-        // Quét mép phải
-        for (x in (sw * 0.95).toInt() downTo (sw * 0.55).toInt()) {
-            var diffSum = 0
-            for (y in (sh * 0.2).toInt()..(sh * 0.8).toInt() step 4) {
-                diffSum += abs(lumAt(x - 2, y) - lumAt(x + 2, y))
-            }
-            if (diffSum / ((sh * 0.6) / 4) > thresholdDiff) {
-                rightX = x
-                break
+        for (y in (sh * 0.02).toInt() until (sh * 0.98).toInt() step 2) {
+            for (x in (sw * 0.02).toInt() until (sw * 0.98).toInt() step 2) {
+                val lum = lumAt(x, y)
+                val match = if (isPaperBright) lum >= threshold else lum < threshold
+                if (match) {
+                    val dx = x - cx
+                    val dy = y - cy
+                    updateCandidate(topTL, -dx - dy, x.toFloat(), y.toFloat())
+                    updateCandidate(topTR, dx - dy, x.toFloat(), y.toFloat())
+                    updateCandidate(topBR, dx + dy, x.toFloat(), y.toFloat())
+                    updateCandidate(topBL, -dx + dy, x.toFloat(), y.toFloat())
+                }
             }
         }
 
-        // Nếu vùng phát hiện được quá hẹp hoặc không hợp lý -> dùng lề an toàn 4% mép ảnh
-        val detectedAreaRatio = ((rightX - leftX) * (bottomY - topY)).toFloat() / (sw * sh)
-        if (detectedAreaRatio < 0.20f || leftX >= rightX || topY >= bottomY) {
-            val insetX = w * 0.04f
-            val insetY = h * 0.04f
-            return DocumentCorners(
-                topLeft = PointF(insetX, insetY),
-                topRight = PointF(w - insetX, insetY),
-                bottomRight = PointF(w - insetX, h - insetY),
-                bottomLeft = PointF(insetX, h - insetY)
-            )
+        if (topTL.isEmpty() || topTR.isEmpty() || topBR.isEmpty() || topBL.isEmpty()) {
+            return DocumentCornersNorm.defaultGuide()
         }
 
-        // Quy đổi ngược về kích thước ảnh gốc
-        val invScale = 1f / scale
-        val fx1 = (leftX * invScale).coerceIn(0f, w.toFloat())
-        val fx2 = (rightX * invScale).coerceIn(0f, w.toFloat())
-        val fy1 = (topY * invScale).coerceIn(0f, h.toFloat())
-        val fy2 = (bottomY * invScale).coerceIn(0f, h.toFloat())
+        // Lấy trung bình top 3-4 điểm cực trị để loại bỏ nhiễu biên (bóng đèn phản chiếu, đầu bút...)
+        fun avgPoint(list: List<CornerCandidate>): PointF {
+            val take = min(list.size, 4)
+            var ax = 0f
+            var ay = 0f
+            for (i in 0 until take) {
+                ax += list[i].x
+                ay += list[i].y
+            }
+            return PointF(ax / take, ay / take)
+        }
 
-        return DocumentCorners(
-            topLeft = PointF(fx1, fy1),
-            topRight = PointF(fx2, fy1),
-            bottomRight = PointF(fx2, fy2),
-            bottomLeft = PointF(fx1, fy2)
+        val pTL = avgPoint(topTL)
+        val pTR = avgPoint(topTR)
+        val pBR = avgPoint(topBR)
+        val pBL = avgPoint(topBL)
+
+        // 5. Kiểm tra tính hợp lệ của tứ giác (diện tích, độ dài cạnh, tính lồi Convexity)
+        val area = 0.5f * abs(
+            (pTL.x * pTR.y - pTR.x * pTL.y) +
+            (pTR.x * pBR.y - pBR.x * pTR.y) +
+            (pBR.x * pBL.y - pBL.x * pBR.y) +
+            (pBL.x * pTL.y - pTL.x * pBL.y)
         )
-    }
+        val areaRatio = area / (sw * sh)
 
-    /**
-     * Nhận diện và trả về tọa độ chuẩn hóa (0f..1f) cho khung vẽ thời gian thực trên Camera.
-     */
-    fun detectCornersNorm(bitmap: Bitmap): DocumentCornersNorm {
-        val corners = detectCorners(bitmap)
-        val w = bitmap.width.toFloat().coerceAtLeast(1f)
-        val h = bitmap.height.toFloat().coerceAtLeast(1f)
+        val minEdge = min(sw, sh) * 0.18f
+        val edgeTop = hypot(pTR.x - pTL.x, pTR.y - pTL.y)
+        val edgeBottom = hypot(pBR.x - pBL.x, pBR.y - pBL.y)
+        val edgeLeft = hypot(pBL.x - pTL.x, pBL.y - pTL.y)
+        val edgeRight = hypot(pBR.x - pTR.x, pBR.y - pTR.y)
+
+        val cp1 = (pTR.x - pTL.x) * (pBR.y - pTR.y) - (pTR.y - pTL.y) * (pBR.x - pTR.x)
+        val cp2 = (pBR.x - pTR.x) * (pBL.y - pBR.y) - (pBR.y - pTR.y) * (pBL.x - pBR.x)
+        val cp3 = (pBL.x - pBR.x) * (pTL.y - pBL.y) - (pBL.y - pBR.y) * (pTL.x - pBL.x)
+        val cp4 = (pTL.x - pBL.x) * (pTR.y - pTL.y) - (pTL.y - pBL.y) * (pTR.x - pTL.x)
+
+        val isConvex = (cp1 > 0 && cp2 > 0 && cp3 > 0 && cp4 > 0) || (cp1 < 0 && cp2 < 0 && cp3 < 0 && cp4 < 0)
+        val validEdges = edgeTop > minEdge && edgeBottom > minEdge && edgeLeft > minEdge && edgeRight > minEdge
+        val validArea = areaRatio in 0.12f..0.88f
+
+        if (!isConvex || !validEdges || !validArea) {
+            return DocumentCornersNorm.defaultGuide()
+        }
+
         return DocumentCornersNorm(
-            topLeft = PointF((corners.topLeft.x / w).coerceIn(0f, 1f), (corners.topLeft.y / h).coerceIn(0f, 1f)),
-            topRight = PointF((corners.topRight.x / w).coerceIn(0f, 1f), (corners.topRight.y / h).coerceIn(0f, 1f)),
-            bottomRight = PointF((corners.bottomRight.x / w).coerceIn(0f, 1f), (corners.bottomRight.y / h).coerceIn(0f, 1f)),
-            bottomLeft = PointF((corners.bottomLeft.x / w).coerceIn(0f, 1f), (corners.bottomLeft.y / h).coerceIn(0f, 1f)),
+            topLeft = PointF((pTL.x / sw).coerceIn(0f, 1f), (pTL.y / sh).coerceIn(0f, 1f)),
+            topRight = PointF((pTR.x / sw).coerceIn(0f, 1f), (pTR.y / sh).coerceIn(0f, 1f)),
+            bottomRight = PointF((pBR.x / sw).coerceIn(0f, 1f), (pBR.y / sh).coerceIn(0f, 1f)),
+            bottomLeft = PointF((pBL.x / sw).coerceIn(0f, 1f), (pBL.y / sh).coerceIn(0f, 1f)),
             isDetected = true
         )
     }

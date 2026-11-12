@@ -207,6 +207,7 @@ fun CameraScannerScreen(
     }
     val analysisExecutor = remember { Executors.newSingleThreadExecutor() }
     var liveCornersNorm by remember { mutableStateOf<DocumentCornersNorm?>(null) }
+    var missedDetectionFrames by remember { mutableIntStateOf(0) }
     var lastAnalysisTime by remember { mutableLongStateOf(0L) }
 
     val imageAnalysis = remember {
@@ -339,15 +340,46 @@ fun CameraScannerScreen(
                     // Phân tích hình ảnh thời gian thực để nhận diện và đóng khung viền mép giấy
                     imageAnalysis.setAnalyzer(analysisExecutor) { imageProxy ->
                         val now = System.currentTimeMillis()
-                        if (now - lastAnalysisTime >= 100 && isAutoCropEnabled && !isShooting && !isReviewing && quickSendPhoto == null) {
+                        if (now - lastAnalysisTime >= 90 && isAutoCropEnabled && !isShooting && !isReviewing && quickSendPhoto == null) {
                             lastAnalysisTime = now
                             try {
-                                val bmp = imageProxy.toBitmap()
-                                if (bmp != null) {
-                                    val norm = DocumentCropper.detectCornersNorm(bmp)
-                                    bmp.recycle()
-                                    scope.launch(Dispatchers.Main) {
-                                        liveCornersNorm = norm
+                                val rotation = imageProxy.imageInfo.rotationDegrees
+                                val rawBmp = imageProxy.toBitmap()
+                                // Xoay ảnh về đúng chiều màn hình (Portrait) trước khi nhận diện
+                                val rotatedBmp = if (rotation != 0) {
+                                    val m = android.graphics.Matrix().apply { postRotate(rotation.toFloat()) }
+                                    val r = android.graphics.Bitmap.createBitmap(rawBmp, 0, 0, rawBmp.width, rawBmp.height, m, true)
+                                    if (r !== rawBmp) rawBmp.recycle()
+                                    r
+                                } else {
+                                    rawBmp
+                                }
+
+                                val detected = DocumentCropper.detectCornersNorm(rotatedBmp)
+                                rotatedBmp.recycle()
+
+                                scope.launch(Dispatchers.Main) {
+                                    if (detected.isDetected) {
+                                        missedDetectionFrames = 0
+                                        val prev = liveCornersNorm
+                                        if (prev == null || !prev.isDetected) {
+                                            liveCornersNorm = detected
+                                        } else {
+                                            // Làm mượt bằng Exponential Moving Average (EMA) để khung không rung lắc
+                                            val a = 0.40f
+                                            liveCornersNorm = DocumentCornersNorm(
+                                                topLeft = android.graphics.PointF(prev.topLeft.x * (1 - a) + detected.topLeft.x * a, prev.topLeft.y * (1 - a) + detected.topLeft.y * a),
+                                                topRight = android.graphics.PointF(prev.topRight.x * (1 - a) + detected.topRight.x * a, prev.topRight.y * (1 - a) + detected.topRight.y * a),
+                                                bottomRight = android.graphics.PointF(prev.bottomRight.x * (1 - a) + detected.bottomRight.x * a, prev.bottomRight.y * (1 - a) + detected.bottomRight.y * a),
+                                                bottomLeft = android.graphics.PointF(prev.bottomLeft.x * (1 - a) + detected.bottomLeft.x * a, prev.bottomLeft.y * (1 - a) + detected.bottomLeft.y * a),
+                                                isDetected = true
+                                            )
+                                        }
+                                    } else {
+                                        missedDetectionFrames++
+                                        if (missedDetectionFrames > 4) {
+                                            liveCornersNorm = DocumentCornersNorm.defaultGuide()
+                                        }
                                     }
                                 }
                             } catch (_: Exception) {}
@@ -1192,28 +1224,61 @@ private fun LiveDocumentFrameOverlay(
 ) {
     val target = cornersNorm ?: remember { DocumentCornersNorm.defaultGuide() }
 
-    val tlX by animateFloatAsState(target.topLeft.x, tween(120), label = "tlX")
-    val tlY by animateFloatAsState(target.topLeft.y, tween(120), label = "tlY")
-    val trX by animateFloatAsState(target.topRight.x, tween(120), label = "trX")
-    val trY by animateFloatAsState(target.topRight.y, tween(120), label = "trY")
-    val brX by animateFloatAsState(target.bottomRight.x, tween(120), label = "brX")
-    val brY by animateFloatAsState(target.bottomRight.y, tween(120), label = "brY")
-    val blX by animateFloatAsState(target.bottomLeft.x, tween(120), label = "blX")
-    val blY by animateFloatAsState(target.bottomLeft.y, tween(120), label = "blY")
+    val tlX by animateFloatAsState(target.topLeft.x, tween(90), label = "tlX")
+    val tlY by animateFloatAsState(target.topLeft.y, tween(90), label = "tlY")
+    val trX by animateFloatAsState(target.topRight.x, tween(90), label = "trX")
+    val trY by animateFloatAsState(target.topRight.y, tween(90), label = "trY")
+    val brX by animateFloatAsState(target.bottomRight.x, tween(90), label = "brX")
+    val brY by animateFloatAsState(target.bottomRight.y, tween(90), label = "brY")
+    val blX by animateFloatAsState(target.bottomLeft.x, tween(90), label = "blX")
+    val blY by animateFloatAsState(target.bottomLeft.y, tween(90), label = "blY")
 
     val isDetected = cornersNorm?.isDetected == true
     val frameColor = if (isDetected) Color(0xFF00BFA5) else Color.White.copy(alpha = 0.35f)
     val cornerColor = if (isDetected) Color(0xFF00E676) else Color.White.copy(alpha = 0.75f)
-    val fillColor = if (isDetected) Color(0x2200BFA5) else Color.Transparent
+    val fillColor = if (isDetected) Color(0x2800BFA5) else Color.Transparent
 
     Canvas(modifier = modifier) {
         val w = size.width
         val h = size.height
 
-        val p1 = Offset(tlX * w, tlY * h)
-        val p2 = Offset(trX * w, trY * h)
-        val p3 = Offset(brX * w, brY * h)
-        val p4 = Offset(blX * w, blY * h)
+        // Quy đổi tọa độ từ Camera sang màn hình chính xác theo ScaleType.FILL_CENTER
+        val camW = 480f
+        val camH = 640f
+        val camAspect = camW / camH // 0.75 (Tỉ lệ ảnh camera sau khi xoay về Portrait)
+        val viewAspect = w / h
+
+        val scaledW: Float
+        val scaledH: Float
+        val offX: Float
+        val offY: Float
+
+        if (viewAspect < camAspect) {
+            // Màn hình điện thoại hẹp và dài hơn ảnh camera -> preview khớp chiều cao, cắt 2 bên
+            val scale = h / camH
+            scaledW = camW * scale
+            scaledH = h
+            offX = -(scaledW - w) / 2f
+            offY = 0f
+        } else {
+            // Màn hình rộng hơn ảnh camera -> preview khớp chiều rộng, cắt trên dưới
+            val scale = w / camW
+            scaledW = w
+            scaledH = camH * scale
+            offX = 0f
+            offY = -(scaledH - h) / 2f
+        }
+
+        fun mapPoint(nx: Float, ny: Float): Offset {
+            val px = nx * scaledW + offX
+            val py = ny * scaledH + offY
+            return Offset(px, py)
+        }
+
+        val p1 = mapPoint(tlX, tlY)
+        val p2 = mapPoint(trX, trY)
+        val p3 = mapPoint(brX, brY)
+        val p4 = mapPoint(blX, blY)
 
         val path = Path().apply {
             moveTo(p1.x, p1.y)
@@ -1223,7 +1288,7 @@ private fun LiveDocumentFrameOverlay(
             close()
         }
 
-        // 1. Phủ màu mờ vùng tài liệu
+        // 1. Phủ màu mờ vùng tài liệu khi đã khóa thành công
         if (fillColor != Color.Transparent) {
             drawPath(path, color = fillColor)
         }
@@ -1232,12 +1297,12 @@ private fun LiveDocumentFrameOverlay(
         drawPath(
             path = path,
             color = frameColor,
-            style = Stroke(width = 2.5.dp.toPx())
+            style = Stroke(width = if (isDetected) 2.8.dp.toPx() else 1.8.dp.toPx())
         )
 
         // 3. 4 góc định vị (Corner Reticle Brackets)
-        val bracketLen = 22.dp.toPx()
-        val bracketWidth = 4.dp.toPx()
+        val bracketLen = if (isDetected) 26.dp.toPx() else 20.dp.toPx()
+        val bracketWidth = if (isDetected) 4.5.dp.toPx() else 3.dp.toPx()
         val cap = StrokeCap.Round
 
         // Góc trên - trái
