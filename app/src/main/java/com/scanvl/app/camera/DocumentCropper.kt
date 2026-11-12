@@ -33,6 +33,27 @@ data class DocumentCorners(
 }
 
 /**
+ * Tọa độ 4 góc chuẩn hóa (0f..1f) phục vụ việc vẽ khung nhận diện thời gian thực trên màn hình Camera.
+ */
+data class DocumentCornersNorm(
+    val topLeft: PointF,
+    val topRight: PointF,
+    val bottomRight: PointF,
+    val bottomLeft: PointF,
+    val isDetected: Boolean = true
+) {
+    companion object {
+        fun defaultGuide(): DocumentCornersNorm = DocumentCornersNorm(
+            topLeft = PointF(0.08f, 0.12f),
+            topRight = PointF(0.92f, 0.12f),
+            bottomRight = PointF(0.92f, 0.88f),
+            bottomLeft = PointF(0.08f, 0.88f),
+            isDetected = false
+        )
+    }
+}
+
+/**
  * Xử lý tự động nhận diện mép tài liệu và nắn thẳng góc (Perspective Transform):
  * - Thu nhỏ để tìm biên tài liệu trong < 30ms không tốn RAM.
  * - Sử dụng Skia Matrix setPolyToPoly phần cứng của Android để nắn phẳng trang tài liệu.
@@ -150,6 +171,22 @@ object DocumentCropper {
             topRight = PointF(fx2, fy1),
             bottomRight = PointF(fx2, fy2),
             bottomLeft = PointF(fx1, fy2)
+        )
+    }
+
+    /**
+     * Nhận diện và trả về tọa độ chuẩn hóa (0f..1f) cho khung vẽ thời gian thực trên Camera.
+     */
+    fun detectCornersNorm(bitmap: Bitmap): DocumentCornersNorm {
+        val corners = detectCorners(bitmap)
+        val w = bitmap.width.toFloat().coerceAtLeast(1f)
+        val h = bitmap.height.toFloat().coerceAtLeast(1f)
+        return DocumentCornersNorm(
+            topLeft = PointF((corners.topLeft.x / w).coerceIn(0f, 1f), (corners.topLeft.y / h).coerceIn(0f, 1f)),
+            topRight = PointF((corners.topRight.x / w).coerceIn(0f, 1f), (corners.topRight.y / h).coerceIn(0f, 1f)),
+            bottomRight = PointF((corners.bottomRight.x / w).coerceIn(0f, 1f), (corners.bottomRight.y / h).coerceIn(0f, 1f)),
+            bottomLeft = PointF((corners.bottomLeft.x / w).coerceIn(0f, 1f), (corners.bottomLeft.y / h).coerceIn(0f, 1f)),
+            isDetected = true
         )
     }
 

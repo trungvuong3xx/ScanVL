@@ -9,6 +9,7 @@ import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.camera.core.Camera
 import androidx.camera.core.CameraSelector
+import androidx.camera.core.ImageAnalysis
 import androidx.camera.core.ImageCapture
 import androidx.camera.core.ImageCaptureException
 import androidx.camera.core.Preview
@@ -16,6 +17,7 @@ import androidx.camera.lifecycle.ProcessCameraProvider
 import androidx.camera.view.PreviewView
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.core.Animatable
+import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.tween
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
@@ -80,6 +82,9 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.scale
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.Path
+import androidx.compose.ui.graphics.StrokeCap
+import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.hapticfeedback.HapticFeedbackType
 import androidx.compose.ui.layout.ContentScale
@@ -106,6 +111,7 @@ import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
 import java.util.UUID
+import java.util.concurrent.Executors
 import kotlin.math.roundToInt
 
 enum class CameraFlashMode {
@@ -199,11 +205,25 @@ fun CameraScannerScreen(
             .setCaptureMode(ImageCapture.CAPTURE_MODE_MINIMIZE_LATENCY)
             .build()
     }
+    val analysisExecutor = remember { Executors.newSingleThreadExecutor() }
+    var liveCornersNorm by remember { mutableStateOf<DocumentCornersNorm?>(null) }
+    var lastAnalysisTime by remember { mutableLongStateOf(0L) }
+
+    val imageAnalysis = remember {
+        ImageAnalysis.Builder()
+            .setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST)
+            .setOutputImageFormat(ImageAnalysis.OUTPUT_IMAGE_FORMAT_RGBA_8888)
+            .setTargetResolution(android.util.Size(480, 640))
+            .build()
+    }
     var cameraControl: Camera? by remember { mutableStateOf(null) }
 
     val sound = remember { MediaActionSound().apply { load(MediaActionSound.SHUTTER_CLICK) } }
     DisposableEffect(Unit) {
-        onDispose { sound.release() }
+        onDispose {
+            sound.release()
+            analysisExecutor.shutdown()
+        }
     }
 
     // Haptic feedback khi điện thoại đạt mức cân bằng hoàn hảo
@@ -316,6 +336,25 @@ fun CameraScannerScreen(
                         it.setSurfaceProvider(previewView.surfaceProvider)
                     }
 
+                    // Phân tích hình ảnh thời gian thực để nhận diện và đóng khung viền mép giấy
+                    imageAnalysis.setAnalyzer(analysisExecutor) { imageProxy ->
+                        val now = System.currentTimeMillis()
+                        if (now - lastAnalysisTime >= 100 && isAutoCropEnabled && !isShooting && !isReviewing && quickSendPhoto == null) {
+                            lastAnalysisTime = now
+                            try {
+                                val bmp = imageProxy.toBitmap()
+                                if (bmp != null) {
+                                    val norm = DocumentCropper.detectCornersNorm(bmp)
+                                    bmp.recycle()
+                                    scope.launch(Dispatchers.Main) {
+                                        liveCornersNorm = norm
+                                    }
+                                }
+                            } catch (_: Exception) {}
+                        }
+                        imageProxy.close()
+                    }
+
                     val cameraSelector = CameraSelector.DEFAULT_BACK_CAMERA
                     try {
                         cameraProvider.unbindAll()
@@ -323,7 +362,8 @@ fun CameraScannerScreen(
                             lifecycleOwner,
                             cameraSelector,
                             preview,
-                            imageCapture
+                            imageCapture,
+                            imageAnalysis
                         )
                     } catch (e: Exception) {
                         e.printStackTrace()
@@ -334,6 +374,14 @@ fun CameraScannerScreen(
             },
             modifier = Modifier.fillMaxSize()
         )
+
+        // 1.5. KHUNG NHẬN DIỆN TÀI LIỆU THỜI GIAN THỰC (Real-time Document Framing Box)
+        if (isAutoCropEnabled && !isShooting && !isReviewing && quickSendPhoto == null) {
+            LiveDocumentFrameOverlay(
+                cornersNorm = liveCornersNorm,
+                modifier = Modifier.fillMaxSize()
+            )
+        }
 
         // 2. Chớp trắng khi chụp
         if (shutterFlashAlpha.value > 0f) {
@@ -1132,4 +1180,80 @@ private fun takePhoto(
             }
         }
     )
+}
+
+// =========================================================================
+// KHUNG VIỀN NHẬN DIỆN TÀI LIỆU THỜI GIAN THỰC (REAL-TIME DOCUMENT FRAME)
+// =========================================================================
+@Composable
+private fun LiveDocumentFrameOverlay(
+    cornersNorm: DocumentCornersNorm?,
+    modifier: Modifier = Modifier
+) {
+    val target = cornersNorm ?: remember { DocumentCornersNorm.defaultGuide() }
+
+    val tlX by animateFloatAsState(target.topLeft.x, tween(120), label = "tlX")
+    val tlY by animateFloatAsState(target.topLeft.y, tween(120), label = "tlY")
+    val trX by animateFloatAsState(target.topRight.x, tween(120), label = "trX")
+    val trY by animateFloatAsState(target.topRight.y, tween(120), label = "trY")
+    val brX by animateFloatAsState(target.bottomRight.x, tween(120), label = "brX")
+    val brY by animateFloatAsState(target.bottomRight.y, tween(120), label = "brY")
+    val blX by animateFloatAsState(target.bottomLeft.x, tween(120), label = "blX")
+    val blY by animateFloatAsState(target.bottomLeft.y, tween(120), label = "blY")
+
+    val isDetected = cornersNorm?.isDetected == true
+    val frameColor = if (isDetected) Color(0xFF00BFA5) else Color.White.copy(alpha = 0.35f)
+    val cornerColor = if (isDetected) Color(0xFF00E676) else Color.White.copy(alpha = 0.75f)
+    val fillColor = if (isDetected) Color(0x2200BFA5) else Color.Transparent
+
+    Canvas(modifier = modifier) {
+        val w = size.width
+        val h = size.height
+
+        val p1 = Offset(tlX * w, tlY * h)
+        val p2 = Offset(trX * w, trY * h)
+        val p3 = Offset(brX * w, brY * h)
+        val p4 = Offset(blX * w, blY * h)
+
+        val path = Path().apply {
+            moveTo(p1.x, p1.y)
+            lineTo(p2.x, p2.y)
+            lineTo(p3.x, p3.y)
+            lineTo(p4.x, p4.y)
+            close()
+        }
+
+        // 1. Phủ màu mờ vùng tài liệu
+        if (fillColor != Color.Transparent) {
+            drawPath(path, color = fillColor)
+        }
+
+        // 2. Viền khung
+        drawPath(
+            path = path,
+            color = frameColor,
+            style = Stroke(width = 2.5.dp.toPx())
+        )
+
+        // 3. 4 góc định vị (Corner Reticle Brackets)
+        val bracketLen = 22.dp.toPx()
+        val bracketWidth = 4.dp.toPx()
+        val cap = StrokeCap.Round
+
+        // Góc trên - trái
+        drawLine(cornerColor, p1, Offset(p1.x + bracketLen, p1.y), strokeWidth = bracketWidth, cap = cap)
+        drawLine(cornerColor, p1, Offset(p1.x, p1.y + bracketLen), strokeWidth = bracketWidth, cap = cap)
+
+        // Góc trên - phải
+        drawLine(cornerColor, p2, Offset(p2.x - bracketLen, p2.y), strokeWidth = bracketWidth, cap = cap)
+        drawLine(cornerColor, p2, Offset(p2.x, p2.y + bracketLen), strokeWidth = bracketWidth, cap = cap)
+
+        // Góc dưới - phải
+        drawLine(cornerColor, p3, Offset(p3.x - bracketLen, p3.y), strokeWidth = bracketWidth, cap = cap)
+        drawLine(cornerColor, p3, Offset(p3.x, p3.y - bracketLen), strokeWidth = bracketWidth, cap = cap)
+
+        // Góc dưới - trái
+        drawLine(cornerColor, p4, Offset(p4.x + bracketLen, p4.y), strokeWidth = bracketWidth, cap = cap)
+        drawLine(cornerColor, p4, Offset(p4.x, p4.y - bracketLen), strokeWidth = bracketWidth, cap = cap)
+    }
 }
