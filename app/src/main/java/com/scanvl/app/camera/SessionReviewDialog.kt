@@ -31,6 +31,8 @@ import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.Crop
 import androidx.compose.material.icons.filled.DeleteOutline
+import androidx.compose.material.icons.filled.Image
+import androidx.compose.material.icons.filled.PictureAsPdf
 import androidx.compose.material.icons.filled.Rotate90DegreesCw
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
@@ -38,6 +40,9 @@ import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.FilledTonalButton
+import androidx.compose.material3.FilledTonalIconButton
+import androidx.compose.material3.FilterChip
+import androidx.compose.material3.FilterChipDefaults
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
@@ -60,11 +65,12 @@ import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
 import coil.compose.AsyncImage
 import com.scanvl.app.data.CapturedPhoto
+import com.scanvl.app.data.DocumentFilter
 import kotlinx.coroutines.launch
 import java.io.File
 
 /**
- * Màn hình xem lại, sửa (xoay 90°) hoặc xóa các ảnh vừa chụp trong phiên scan.
+ * Màn hình xem lại, sửa (xoay 90°, cắt viền, đổi bộ lọc màu) hoặc xóa các ảnh vừa chụp trong phiên scan.
  */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -74,8 +80,11 @@ fun SessionReviewDialog(
     onDismiss: () -> Unit,
     onRotate: (Int) -> Unit,
     onCrop: (Int) -> Unit,
+    onApplyFilter: (Int, DocumentFilter) -> Unit,
     onDelete: (Int) -> Unit,
-    onFinish: () -> Unit
+    onFinish: () -> Unit,
+    onSendPdf: (() -> Unit)? = null,
+    onSendImages: (() -> Unit)? = null
 ) {
     if (photos.isEmpty()) {
         onDismiss()
@@ -131,6 +140,21 @@ fun SessionReviewDialog(
                         }
                     },
                     actions = {
+                        if (onSendPdf != null) {
+                            FilledTonalButton(
+                                onClick = onSendPdf,
+                                shape = RoundedCornerShape(12.dp),
+                                colors = ButtonDefaults.filledTonalButtonColors(
+                                    containerColor = Color(0x3300BFA5),
+                                    contentColor = Color(0xFF00BFA5)
+                                ),
+                                modifier = Modifier.padding(end = 4.dp)
+                            ) {
+                                Icon(Icons.Default.PictureAsPdf, contentDescription = null, modifier = Modifier.size(18.dp))
+                                Spacer(Modifier.width(4.dp))
+                                Text("Gửi PDF")
+                            }
+                        }
                         Button(
                             onClick = onFinish,
                             colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF00BFA5)),
@@ -139,7 +163,7 @@ fun SessionReviewDialog(
                         ) {
                             Icon(Icons.Default.Check, contentDescription = null, tint = Color.White)
                             Spacer(Modifier.width(4.dp))
-                            Text("Hoàn thành", color = Color.White, fontWeight = FontWeight.Bold)
+                            Text("Xong", color = Color.White, fontWeight = FontWeight.Bold)
                         }
                     },
                     colors = TopAppBarDefaults.topAppBarColors(containerColor = Color(0xFF1E1E1E))
@@ -178,12 +202,39 @@ fun SessionReviewDialog(
                     }
                 }
 
+                // Hàng chọn Bộ Lọc Màu tăng cường văn bản
+                if (currentPhoto != null) {
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(horizontal = 16.dp, vertical = 2.dp),
+                        horizontalArrangement = Arrangement.Center,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        DocumentFilter.entries.forEach { filter ->
+                            val isSelected = currentPhoto.filter == filter
+                            FilterChip(
+                                selected = isSelected,
+                                onClick = { onApplyFilter(currentIndex, filter) },
+                                label = { Text(filter.label) },
+                                colors = FilterChipDefaults.filterChipColors(
+                                    selectedContainerColor = Color(0xFF00BFA5),
+                                    selectedLabelColor = Color.White,
+                                    containerColor = Color(0xFF2A2A2A),
+                                    labelColor = Color(0xFFCCCCCC)
+                                ),
+                                modifier = Modifier.padding(horizontal = 4.dp)
+                            )
+                        }
+                    }
+                }
+
                 // Thanh nút hành động nhanh cho trang đang chọn: Xoay 90°, Cắt viền & Xóa
                 if (currentPhoto != null) {
                     Row(
                         modifier = Modifier
                             .fillMaxWidth()
-                            .padding(horizontal = 16.dp, vertical = 6.dp),
+                            .padding(horizontal = 16.dp, vertical = 4.dp),
                         horizontalArrangement = Arrangement.SpaceEvenly,
                         verticalAlignment = Alignment.CenterVertically
                     ) {

@@ -3,9 +3,12 @@ package com.scanvl.app.camera
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
 import android.graphics.Canvas
+import android.graphics.ColorMatrix
+import android.graphics.ColorMatrixColorFilter
 import android.graphics.Matrix
 import android.graphics.Paint
 import android.graphics.PointF
+import com.scanvl.app.data.DocumentFilter
 import java.io.File
 import java.io.FileOutputStream
 import kotlin.math.abs
@@ -18,7 +21,16 @@ data class DocumentCorners(
     val topRight: PointF,
     val bottomRight: PointF,
     val bottomLeft: PointF
-)
+) {
+    companion object {
+        fun full(w: Int, h: Int): DocumentCorners = DocumentCorners(
+            topLeft = PointF(0f, 0f),
+            topRight = PointF(w.toFloat(), 0f),
+            bottomRight = PointF(w.toFloat(), h.toFloat()),
+            bottomLeft = PointF(0f, h.toFloat())
+        )
+    }
+}
 
 /**
  * Xử lý tự động nhận diện mép tài liệu và nắn thẳng góc (Perspective Transform):
@@ -178,21 +190,118 @@ object DocumentCropper {
     }
 
     /**
-     * Cắt và lưu đè lên file ảnh.
+     * Áp dụng bộ lọc hình ảnh tăng cường chất lượng văn bản:
+     * - [DocumentFilter.ORIGINAL]: Giữ nguyên màu gốc.
+     * - [DocumentFilter.MAGIC_DOC]: Tăng tương phản nhẹ, nâng sáng khử bóng bàn tay / bóng điện thoại,
+     *   làm trắng nền giấy nhưng giữ 100% màu con dấu đỏ và chữ ký xanh.
+     * - [DocumentFilter.BW]: Chuyển trắng đen rõ nét, chữ đen đậm, nền trắng tinh, tối ưu in ấn.
      */
-    fun cropFile(file: File, corners: DocumentCorners? = null): Boolean {
+    fun applyFilter(source: Bitmap, filter: DocumentFilter): Bitmap {
+        if (filter == DocumentFilter.ORIGINAL) return source
+
+        val output = Bitmap.createBitmap(source.width, source.height, Bitmap.Config.ARGB_8888)
+        val canvas = Canvas(output)
+        val paint = Paint(Paint.ANTI_ALIAS_FLAG or Paint.FILTER_BITMAP_FLAG)
+
+        val cm = when (filter) {
+            DocumentFilter.MAGIC_DOC -> {
+                val matrix = ColorMatrix()
+                val contrast = 1.35f
+                val brightness = 20f
+                val scale = contrast
+                val translate = (1f - contrast) * 128f + brightness
+                matrix.set(floatArrayOf(
+                    scale, 0f, 0f, 0f, translate,
+                    0f, scale, 0f, 0f, translate,
+                    0f, 0f, scale, 0f, translate,
+                    0f, 0f, 0f, 1f, 0f
+                ))
+                matrix
+            }
+            DocumentFilter.BW -> {
+                val matrix = ColorMatrix()
+                matrix.setSaturation(0f)
+                val contrast = 1.85f
+                val translate = (1f - contrast) * 128f - 5f
+                val cmContrast = ColorMatrix(floatArrayOf(
+                    contrast, 0f, 0f, 0f, translate,
+                    0f, contrast, 0f, 0f, translate,
+                    0f, 0f, contrast, 0f, translate,
+                    0f, 0f, 0f, 1f, 0f
+                ))
+                matrix.postConcat(cmContrast)
+                matrix
+            }
+            DocumentFilter.ORIGINAL -> ColorMatrix()
+        }
+
+        paint.colorFilter = ColorMatrixColorFilter(cm)
+        canvas.drawBitmap(source, 0f, 0f, paint)
+        return output
+    }
+
+    /**
+     * Cắt góc và áp dụng bộ lọc đồng thời trong 1 lần nạp/ghi, tối ưu tốc độ và tránh đè I/O.
+     */
+    fun processFile(
+        file: File,
+        corners: DocumentCorners? = null,
+        filter: DocumentFilter = DocumentFilter.ORIGINAL,
+        jpegQuality: Int = 90
+    ): Boolean {
         if (!file.exists()) return false
         val original = BitmapFactory.decodeFile(file.absolutePath) ?: return false
         val targetCorners = corners ?: detectCorners(original)
         val warped = warp(original, targetCorners)
         if (warped !== original) original.recycle()
 
+        val processed = if (filter != DocumentFilter.ORIGINAL) {
+            val filtered = applyFilter(warped, filter)
+            if (filtered !== warped) warped.recycle()
+            filtered
+        } else {
+            warped
+        }
+
         return try {
-            val tmp = File(file.parentFile, file.name + ".cropped")
+            val tmp = File(file.parentFile, file.name + ".tmp")
             FileOutputStream(tmp).buffered(64 * 1024).use {
-                warped.compress(Bitmap.CompressFormat.JPEG, 92, it)
+                processed.compress(Bitmap.CompressFormat.JPEG, jpegQuality, it)
             }
-            warped.recycle()
+            processed.recycle()
+            if (!tmp.renameTo(file)) {
+                tmp.copyTo(file, overwrite = true)
+                tmp.delete()
+            }
+            true
+        } catch (e: Exception) {
+            e.printStackTrace()
+            false
+        }
+    }
+
+    /**
+     * Cắt và lưu đè lên file ảnh (tương thích ngược).
+     */
+    fun cropFile(file: File, corners: DocumentCorners? = null): Boolean =
+        processFile(file, corners, DocumentFilter.ORIGINAL)
+
+    /**
+     * Áp dụng bộ lọc lên file ảnh đã có.
+     */
+    fun filterFile(file: File, filter: DocumentFilter): Boolean {
+        if (!file.exists() || filter == DocumentFilter.ORIGINAL) return true
+        val original = BitmapFactory.decodeFile(file.absolutePath) ?: return false
+        val filtered = applyFilter(original, filter)
+        if (filtered === original) return true
+        original.recycle()
+
+        return try {
+            val tmp = File(file.parentFile, file.name + ".flt")
+            FileOutputStream(tmp).buffered(64 * 1024).use {
+                filtered.compress(Bitmap.CompressFormat.JPEG, 90, it)
+            }
+            filtered.recycle()
             if (!tmp.renameTo(file)) {
                 tmp.copyTo(file, overwrite = true)
                 tmp.delete()

@@ -43,24 +43,32 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.AutoAwesome
 import androidx.compose.material.icons.filled.Close
+import androidx.compose.material.icons.filled.Crop
 import androidx.compose.material.icons.filled.FlashAuto
 import androidx.compose.material.icons.filled.FlashOff
 import androidx.compose.material.icons.filled.FlashOn
 import androidx.compose.material.icons.filled.HighQuality
+import androidx.compose.material.icons.filled.Image
 import androidx.compose.material.icons.filled.MoreVert
+import androidx.compose.material.icons.filled.PictureAsPdf
 import androidx.compose.material.icons.filled.Refresh
+import androidx.compose.material3.Button
+import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
+import androidx.compose.material3.FilledTonalButton
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
+import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.mutableStateListOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -86,8 +94,11 @@ import androidx.compose.ui.viewinterop.AndroidView
 import androidx.core.content.ContextCompat
 import coil.compose.AsyncImage
 import com.scanvl.app.data.CapturedPhoto
+import com.scanvl.app.data.DocumentFilter
 import com.scanvl.app.data.DocumentStore
+import com.scanvl.app.data.QuickSendAction
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.io.File
@@ -116,7 +127,7 @@ enum class CameraScanTab {
 fun CameraScannerScreen(
     initialTab: CameraScanTab = CameraScanTab.BATCH,
     onClose: () -> Unit,
-    onFinishScan: (List<CapturedPhoto>) -> Unit
+    onFinishScan: (List<CapturedPhoto>, QuickSendAction) -> Unit
 ) {
     val context = LocalContext.current
     val lifecycleOwner = LocalLifecycleOwner.current
@@ -157,10 +168,12 @@ fun CameraScannerScreen(
         return
     }
 
-    // State Camera & Sensor
+    // State Camera & Sensor & Settings
     val store = remember { DocumentStore(context) }
     var isShutterSoundEnabled by remember { mutableStateOf(store.isShutterSoundEnabled) }
     var isAutoCropEnabled by remember { mutableStateOf(store.isAutoCropEnabled) }
+    var isAutoSnapLevelEnabled by remember { mutableStateOf(store.isAutoSnapLevelEnabled) }
+    var selectedFilter by remember { mutableStateOf(store.defaultFilter) }
 
     val levelState by rememberDeviceLevel()
     var scanTab by remember { mutableStateOf(initialTab) }
@@ -172,6 +185,8 @@ fun CameraScannerScreen(
     val capturedPhotos = remember { mutableStateListOf<CapturedPhoto>() }
     var isReviewing by remember { mutableStateOf(false) }
     var reviewStartIndex by remember { mutableIntStateOf(0) }
+    var quickSendPhoto by remember { mutableStateOf<CapturedPhoto?>(null) }
+    var lastAutoSnapTime by remember { mutableLongStateOf(0L) }
 
     // Shutter animation state
     var isShooting by remember { mutableStateOf(false) }
@@ -198,6 +213,84 @@ fun CameraScannerScreen(
             haptic.performHapticFeedback(HapticFeedbackType.LongPress)
         }
         wasBalanced = levelState.isBalanced
+    }
+
+    // Hàm chụp ảnh chính: TỐC ĐỘ CAO, KHÔNG KHÓA NÚT CHỤP (Non-blocking Burst Capture)
+    fun performShutter() {
+        if (isShooting) return
+        isShooting = true
+
+        // Chớp animation & âm thanh (nếu bật)
+        scope.launch {
+            if (isShutterSoundEnabled) {
+                sound.play(MediaActionSound.SHUTTER_CLICK)
+            }
+            haptic.performHapticFeedback(HapticFeedbackType.LongPress)
+            shutterButtonScale.animateTo(0.85f, tween(70))
+            shutterButtonScale.animateTo(1f, tween(90))
+        }
+        scope.launch {
+            shutterFlashAlpha.snapTo(0.6f)
+            shutterFlashAlpha.animateTo(0f, tween(150))
+        }
+
+        // Chụp và lưu ảnh vào cache session
+        takePhoto(
+            context = context,
+            imageCapture = imageCapture,
+            onSuccess = { file ->
+                // MỞ KHÓA NÚT CHỤP NGAY LẬP TỨC: Người dùng có thể bấm chụp tiếp tục không trễ
+                isShooting = false
+
+                val filterToApply = selectedFilter
+                val item = CapturedPhoto(file = file, filter = filterToApply)
+                capturedPhotos.add(item)
+
+                // Nếu là chế độ chụp đơn: mở ngay thanh 1 chạm Gửi PDF / Gửi Ảnh
+                if (scanTab == CameraScanTab.SINGLE) {
+                    quickSendPhoto = item
+                }
+
+                // Xử lý nắn viền & bộ lọc ngầm trên background thread không gây đơ UI
+                scope.launch(Dispatchers.Default) {
+                    if (isAutoCropEnabled || filterToApply != DocumentFilter.ORIGINAL) {
+                        DocumentCropper.processFile(
+                            file = file,
+                            corners = null,
+                            filter = filterToApply
+                        )
+                        withContext(Dispatchers.Main) {
+                            val idx = capturedPhotos.indexOfFirst { it.file.absolutePath == file.absolutePath }
+                            if (idx >= 0) {
+                                capturedPhotos[idx] = capturedPhotos[idx].copy(id = UUID.randomUUID().toString())
+                            }
+                        }
+                    }
+                }
+            },
+            onError = {
+                isShooting = false
+                Toast.makeText(context, "Lỗi khi chụp: ${it.message}", Toast.LENGTH_SHORT).show()
+            }
+        )
+    }
+
+    // Tự động chụp khi điện thoại đạt mức cân bằng và đứng yên (Auto-Snap on Steady Level)
+    LaunchedEffect(levelState.isBalanced, isAutoSnapLevelEnabled) {
+        if (!isAutoSnapLevelEnabled) return@LaunchedEffect
+        if (levelState.isBalanced) {
+            val startTime = System.currentTimeMillis()
+            while (levelState.isBalanced) {
+                val elapsed = System.currentTimeMillis() - startTime
+                val now = System.currentTimeMillis()
+                if (elapsed >= 450 && now - lastAutoSnapTime >= 1800 && !isShooting && !isReviewing && quickSendPhoto == null) {
+                    lastAutoSnapTime = now
+                    performShutter()
+                    break
+                }
+                delay(50)
+            }
+        }
     }
 
     Box(
@@ -277,6 +370,11 @@ fun CameraScannerScreen(
             flashMode = flashMode,
             isHdMode = isHdMode,
             showMoreMenu = showMoreMenu,
+            showLevelIndicator = showLevelIndicator,
+            isShutterSoundEnabled = isShutterSoundEnabled,
+            isAutoCropEnabled = isAutoCropEnabled,
+            isAutoSnapLevelEnabled = isAutoSnapLevelEnabled,
+            selectedFilter = selectedFilter,
             onClose = onClose,
             onToggleFlash = {
                 flashMode = when (flashMode) {
@@ -289,21 +387,34 @@ fun CameraScannerScreen(
             },
             onToggleHd = { isHdMode = !isHdMode },
             onToggleMoreMenu = { showMoreMenu = !showMoreMenu },
-            showLevelIndicator = showLevelIndicator,
             onToggleLevel = { showLevelIndicator = !showLevelIndicator },
-            isShutterSoundEnabled = isShutterSoundEnabled,
             onToggleSound = {
                 val next = !isShutterSoundEnabled
                 isShutterSoundEnabled = next
                 store.isShutterSoundEnabled = next
                 Toast.makeText(context, if (next) "Âm thanh chụp: Bật" else "Âm thanh chụp: Đã tắt (Im lặng)", Toast.LENGTH_SHORT).show()
             },
-            isAutoCropEnabled = isAutoCropEnabled,
             onToggleAutoCrop = {
                 val next = !isAutoCropEnabled
                 isAutoCropEnabled = next
                 store.isAutoCropEnabled = next
                 Toast.makeText(context, if (next) "Tự động cắt viền: Bật" else "Tự động cắt viền: Tắt (Giữ toàn khung)", Toast.LENGTH_SHORT).show()
+            },
+            onToggleAutoSnapLevel = {
+                val next = !isAutoSnapLevelEnabled
+                isAutoSnapLevelEnabled = next
+                store.isAutoSnapLevelEnabled = next
+                Toast.makeText(context, if (next) "Tự chụp khi cân bằng: Bật" else "Tự chụp khi cân bằng: Tắt", Toast.LENGTH_SHORT).show()
+            },
+            onCycleFilter = {
+                val next = when (selectedFilter) {
+                    DocumentFilter.MAGIC_DOC -> DocumentFilter.BW
+                    DocumentFilter.BW -> DocumentFilter.ORIGINAL
+                    DocumentFilter.ORIGINAL -> DocumentFilter.MAGIC_DOC
+                }
+                selectedFilter = next
+                store.defaultFilter = next
+                Toast.makeText(context, "Bộ lọc: ${next.label}", Toast.LENGTH_SHORT).show()
             }
         )
 
@@ -315,52 +426,7 @@ fun CameraScannerScreen(
             isShooting = isShooting,
             shutterScale = shutterButtonScale.value,
             onSelectTab = { scanTab = it },
-            onShutterClick = {
-                if (isShooting) return@BottomControlsBar
-                isShooting = true
-
-                // Chớp animation & âm thanh (nếu bật)
-                scope.launch {
-                    if (isShutterSoundEnabled) {
-                        sound.play(MediaActionSound.SHUTTER_CLICK)
-                    }
-                    haptic.performHapticFeedback(HapticFeedbackType.LongPress)
-                    shutterButtonScale.animateTo(0.85f, tween(80))
-                    shutterButtonScale.animateTo(1f, tween(100))
-                }
-                scope.launch {
-                    shutterFlashAlpha.snapTo(0.6f)
-                    shutterFlashAlpha.animateTo(0f, tween(200))
-                }
-
-                // Chụp và lưu ảnh vào cache session (tự động cắt viền nếu bật)
-                takePhoto(
-                    context = context,
-                    imageCapture = imageCapture,
-                    onSuccess = { file ->
-                        scope.launch(Dispatchers.Default) {
-                            if (isAutoCropEnabled) {
-                                DocumentCropper.cropFile(file)
-                            }
-                            withContext(Dispatchers.Main) {
-                                val item = CapturedPhoto(file = file)
-                                capturedPhotos.add(item)
-                                isShooting = false
-
-                                // Nếu là chế độ chụp đơn: mở ngay màn hình xem lại / hoàn thành
-                                if (scanTab == CameraScanTab.SINGLE) {
-                                    reviewStartIndex = capturedPhotos.size - 1
-                                    isReviewing = true
-                                }
-                            }
-                        }
-                    },
-                    onError = {
-                        isShooting = false
-                        Toast.makeText(context, "Lỗi khi chụp: ${it.message}", Toast.LENGTH_SHORT).show()
-                    }
-                )
-            },
+            onShutterClick = { performShutter() },
             onOpenReview = {
                 if (capturedPhotos.isNotEmpty()) {
                     reviewStartIndex = capturedPhotos.size - 1
@@ -369,14 +435,50 @@ fun CameraScannerScreen(
             },
             onFinish = {
                 if (capturedPhotos.isNotEmpty()) {
-                    onFinishScan(capturedPhotos.toList())
+                    onFinishScan(capturedPhotos.toList(), QuickSendAction.NONE)
                 }
             },
             modifier = Modifier.align(Alignment.BottomCenter)
         )
+
+        // 6. THANH 1 CHẠM GỬI NHANH CHO CHẾ ĐỘ CHỤP ĐƠN (Zero-Latency 2-tap UX)
+        if (quickSendPhoto != null) {
+            Box(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .background(Color.Black.copy(alpha = 0.45f)),
+                contentAlignment = Alignment.BottomCenter
+            ) {
+                QuickSendSheet(
+                    photo = quickSendPhoto!!,
+                    onSendPdf = {
+                        val p = quickSendPhoto!!
+                        quickSendPhoto = null
+                        onFinishScan(listOf(p), QuickSendAction.SEND_PDF)
+                    },
+                    onSendImages = {
+                        val p = quickSendPhoto!!
+                        quickSendPhoto = null
+                        onFinishScan(listOf(p), QuickSendAction.SEND_IMAGES)
+                    },
+                    onEdit = {
+                        val p = quickSendPhoto!!
+                        quickSendPhoto = null
+                        reviewStartIndex = capturedPhotos.indexOfFirst { it.file.absolutePath == p.file.absolutePath }.coerceAtLeast(0)
+                        isReviewing = true
+                    },
+                    onRetake = {
+                        val p = quickSendPhoto!!
+                        quickSendPhoto = null
+                        capturedPhotos.removeAll { it.file.absolutePath == p.file.absolutePath }
+                        p.file.delete()
+                    }
+                )
+            }
+        }
     }
 
-    // 6. Dialog Xem ảnh vừa chụp, Sửa (Xoay, Cắt viền) hoặc Xóa
+    // 7. Dialog Xem ảnh vừa chụp, Sửa (Xoay, Cắt viền, Đổi bộ lọc) hoặc Xóa
     if (isReviewing && capturedPhotos.isNotEmpty()) {
         SessionReviewDialog(
             photos = capturedPhotos,
@@ -389,10 +491,20 @@ fun CameraScannerScreen(
             onCrop = { idx ->
                 val cur = capturedPhotos[idx]
                 scope.launch(Dispatchers.Default) {
-                    DocumentCropper.cropFile(cur.file)
+                    DocumentCropper.processFile(cur.file, filter = cur.filter)
                     withContext(Dispatchers.Main) {
                         capturedPhotos[idx] = cur.copy(id = UUID.randomUUID().toString())
-                        Toast.makeText(context, "Đã tự động cắt và nắn phẳng tài liệu trang ${idx + 1}", Toast.LENGTH_SHORT).show()
+                        Toast.makeText(context, "Đã tự động cắt và nắn phẳng trang ${idx + 1}", Toast.LENGTH_SHORT).show()
+                    }
+                }
+            },
+            onApplyFilter = { idx, filter ->
+                val cur = capturedPhotos[idx]
+                capturedPhotos[idx] = cur.copy(filter = filter, id = UUID.randomUUID().toString())
+                scope.launch(Dispatchers.Default) {
+                    DocumentCropper.filterFile(cur.file, filter)
+                    withContext(Dispatchers.Main) {
+                        capturedPhotos[idx] = cur.copy(id = UUID.randomUUID().toString())
                     }
                 }
             },
@@ -405,7 +517,15 @@ fun CameraScannerScreen(
             },
             onFinish = {
                 isReviewing = false
-                onFinishScan(capturedPhotos.toList())
+                onFinishScan(capturedPhotos.toList(), QuickSendAction.NONE)
+            },
+            onSendPdf = {
+                isReviewing = false
+                onFinishScan(capturedPhotos.toList(), QuickSendAction.SEND_PDF)
+            },
+            onSendImages = {
+                isReviewing = false
+                onFinishScan(capturedPhotos.toList(), QuickSendAction.SEND_IMAGES)
             }
         )
     }
@@ -518,13 +638,17 @@ private fun TopCameraBar(
     showLevelIndicator: Boolean,
     isShutterSoundEnabled: Boolean,
     isAutoCropEnabled: Boolean,
+    isAutoSnapLevelEnabled: Boolean,
+    selectedFilter: DocumentFilter,
     onClose: () -> Unit,
     onToggleFlash: () -> Unit,
     onToggleHd: () -> Unit,
     onToggleMoreMenu: () -> Unit,
     onToggleLevel: () -> Unit,
     onToggleSound: () -> Unit,
-    onToggleAutoCrop: () -> Unit
+    onToggleAutoCrop: () -> Unit,
+    onToggleAutoSnapLevel: () -> Unit,
+    onCycleFilter: () -> Unit
 ) {
     Row(
         modifier = Modifier
@@ -549,9 +673,13 @@ private fun TopCameraBar(
                 Icon(icon, contentDescription = "Flash", tint = if (flashMode != CameraFlashMode.OFF) Color(0xFFFFEB3B) else Color.White)
             }
 
-            // Bộ lọc / Làm đẹp
-            IconButton(onClick = {}) {
-                Icon(Icons.Default.AutoAwesome, contentDescription = "Bộ lọc", tint = Color.White)
+            // Bộ lọc / Làm đẹp (Bấm đổi nhanh Gốc -> Tài liệu -> Đen trắng)
+            IconButton(onClick = onCycleFilter) {
+                Icon(
+                    Icons.Default.AutoAwesome,
+                    contentDescription = "Bộ lọc: ${selectedFilter.label}",
+                    tint = if (selectedFilter != DocumentFilter.ORIGINAL) Color(0xFF00BFA5) else Color.White
+                )
             }
 
             // HD Button
@@ -593,7 +721,7 @@ private fun TopCameraBar(
                     )
                     DropdownMenuItem(
                         text = {
-                            Text(if (isAutoCropEnabled) "✂️ Tự động cắt tài liệu: Bật" else "✂️ Tự động cắt tài liệu: Tắt")
+                            Text(if (isAutoCropEnabled) "✂️ Tự động cắt viền: Bật" else "✂️ Tự động cắt viền: Tắt")
                         },
                         onClick = {
                             onToggleAutoCrop()
@@ -609,6 +737,159 @@ private fun TopCameraBar(
                             onToggleMoreMenu()
                         }
                     )
+                    DropdownMenuItem(
+                        text = {
+                            Text(if (isAutoSnapLevelEnabled) "⚡ Tự chụp khi cân bằng: Bật" else "⚡ Tự chụp khi cân bằng: Tắt")
+                        },
+                        onClick = {
+                            onToggleAutoSnapLevel()
+                            onToggleMoreMenu()
+                        }
+                    )
+                    DropdownMenuItem(
+                        text = {
+                            Text("🎨 Bộ lọc: ${selectedFilter.label} (Chạm để đổi)")
+                        },
+                        onClick = {
+                            onCycleFilter()
+                            onToggleMoreMenu()
+                        }
+                    )
+                }
+            }
+        }
+    }
+}
+
+// =========================================================================
+// THANH GỬI NHANH 1 CHẠM (CHO CHẾ ĐỘ CHỤP ĐƠN - ZERO-LATENCY UX)
+// =========================================================================
+@Composable
+private fun QuickSendSheet(
+    photo: CapturedPhoto,
+    onSendPdf: () -> Unit,
+    onSendImages: () -> Unit,
+    onEdit: () -> Unit,
+    onRetake: () -> Unit
+) {
+    Surface(
+        color = Color(0xFF1E1E1E),
+        shape = RoundedCornerShape(topStart = 24.dp, topEnd = 24.dp),
+        shadowElevation = 16.dp,
+        modifier = Modifier
+            .fillMaxWidth()
+            .navigationBarsPadding()
+    ) {
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 20.dp, vertical = 14.dp),
+            horizontalAlignment = Alignment.CenterHorizontally
+        ) {
+            // Thanh gạt nhỏ
+            Box(
+                modifier = Modifier
+                    .size(width = 38.dp, height = 4.dp)
+                    .clip(RoundedCornerShape(2.dp))
+                    .background(Color.White.copy(alpha = 0.3f))
+            )
+
+            Spacer(Modifier.height(12.dp))
+
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                // Mini preview của ảnh vừa chụp
+                Box(
+                    modifier = Modifier
+                        .size(width = 50.dp, height = 66.dp)
+                        .clip(RoundedCornerShape(8.dp))
+                        .background(Color.Black)
+                        .clickable(onClick = onEdit)
+                ) {
+                    AsyncImage(
+                        model = photo.file,
+                        contentDescription = null,
+                        contentScale = ContentScale.Crop,
+                        modifier = Modifier
+                            .fillMaxSize()
+                            .graphicsLayer { rotationZ = photo.rotation.toFloat() }
+                    )
+                }
+
+                Spacer(Modifier.width(14.dp))
+
+                Column(modifier = Modifier.weight(1f)) {
+                    Text(
+                        text = "Đã quét 1 trang",
+                        color = Color.White,
+                        style = MaterialTheme.typography.titleMedium,
+                        fontWeight = FontWeight.Bold
+                    )
+                    Text(
+                        text = "Bộ lọc: ${photo.filter.label} • 2 chạm là gửi",
+                        color = Color(0xFF00BFA5),
+                        style = MaterialTheme.typography.bodySmall
+                    )
+                }
+            }
+
+            Spacer(Modifier.height(14.dp))
+
+            // 2 Nút gửi lớn 1 chạm
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(10.dp)
+            ) {
+                Button(
+                    onClick = onSendPdf,
+                    colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF00BFA5)),
+                    shape = RoundedCornerShape(14.dp),
+                    modifier = Modifier
+                        .weight(1f)
+                        .height(48.dp)
+                ) {
+                    Icon(Icons.Default.PictureAsPdf, contentDescription = null, tint = Color.White, modifier = Modifier.size(18.dp))
+                    Spacer(Modifier.width(6.dp))
+                    Text("⚡ Gửi PDF", fontWeight = FontWeight.Bold, color = Color.White)
+                }
+
+                FilledTonalButton(
+                    onClick = onSendImages,
+                    shape = RoundedCornerShape(14.dp),
+                    colors = ButtonDefaults.filledTonalButtonColors(
+                        containerColor = Color(0xFF333333),
+                        contentColor = Color.White
+                    ),
+                    modifier = Modifier
+                        .weight(1f)
+                        .height(48.dp)
+                ) {
+                    Icon(Icons.Default.Image, contentDescription = null, modifier = Modifier.size(18.dp))
+                    Spacer(Modifier.width(6.dp))
+                    Text("⚡ Gửi Ảnh", fontWeight = FontWeight.Bold)
+                }
+            }
+
+            Spacer(Modifier.height(8.dp))
+
+            // Hàng nút phụ: [Chụp lại] & [Chỉnh sửa]
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                TextButton(onClick = onRetake) {
+                    Icon(Icons.Default.Refresh, contentDescription = null, tint = Color(0xFFFF5252), modifier = Modifier.size(16.dp))
+                    Spacer(Modifier.width(4.dp))
+                    Text("Chụp lại", color = Color(0xFFFF5252))
+                }
+
+                TextButton(onClick = onEdit) {
+                    Icon(Icons.Default.Crop, contentDescription = null, tint = Color(0xFF00BFA5), modifier = Modifier.size(16.dp))
+                    Spacer(Modifier.width(4.dp))
+                    Text("Chỉnh sửa / Cắt", color = Color(0xFF00BFA5))
                 }
             }
         }

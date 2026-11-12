@@ -112,6 +112,7 @@ import com.scanvl.app.camera.CameraScannerScreen
 import com.scanvl.app.camera.CameraScanTab
 import com.scanvl.app.data.DocumentStore
 import com.scanvl.app.data.ExportQuality
+import com.scanvl.app.data.QuickSendAction
 import com.scanvl.app.data.ScanDoc
 import com.scanvl.app.data.ScanPage
 import kotlinx.coroutines.launch
@@ -145,14 +146,26 @@ fun ScanVLApp(
     }
 
     if (cameraSession != null) {
-        BackHandler { cameraSession = null }
+        BackHandler {
+            cameraSession = null
+            vm.cleanSessionCache()
+        }
         CameraScannerScreen(
             initialTab = cameraSession!!.tab,
-            onClose = { cameraSession = null },
-            onFinishScan = { photos ->
+            onClose = {
+                cameraSession = null
+                vm.cleanSessionCache()
+            },
+            onFinishScan = { photos, action ->
                 val targetId = cameraSession?.targetDocId
                 cameraSession = null
-                vm.importCapturedPhotos(photos, targetId)
+                vm.importCapturedPhotos(photos, targetId) { newDocId ->
+                    when (action) {
+                        QuickSendAction.SEND_PDF -> onSendPdf(newDocId)
+                        QuickSendAction.SEND_IMAGES -> onSendImages(newDocId)
+                        QuickSendAction.NONE -> { /* mở tài liệu bình thường */ }
+                    }
+                }
             }
         )
         return

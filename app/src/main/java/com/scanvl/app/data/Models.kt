@@ -42,5 +42,24 @@ data class ScanDoc(
 data class CapturedPhoto(
     val id: String = java.util.UUID.randomUUID().toString(),
     val file: java.io.File,
-    val rotation: Int = 0
+    val rotation: Int = 0,
+    val filter: DocumentFilter = DocumentFilter.ORIGINAL
 )
+
+/**
+ * Bộ lọc tăng cường chất lượng tài liệu
+ */
+enum class DocumentFilter(val label: String) {
+    ORIGINAL("Gốc"),
+    MAGIC_DOC("Tài liệu"),
+    BW("Đen trắng")
+}
+
+/**
+ * Hành động gửi nhanh 1 chạm sau khi chụp
+ */
+enum class QuickSendAction {
+    NONE,
+    SEND_PDF,
+    SEND_IMAGES
+}

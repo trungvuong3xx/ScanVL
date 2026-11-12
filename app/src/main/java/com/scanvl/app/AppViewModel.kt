@@ -90,7 +90,11 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
     // ------------------------------------------------------------------
     // Nhận kết quả quét từ Camera tùy biến hoặc ML Kit
     // ------------------------------------------------------------------
-    fun importCapturedPhotos(photos: List<CapturedPhoto>, targetDocId: String?) {
+    fun importCapturedPhotos(
+        photos: List<CapturedPhoto>,
+        targetDocId: String?,
+        onComplete: ((String) -> Unit)? = null
+    ) {
         if (photos.isEmpty()) return
         viewModelScope.launch {
             busy = "Đang lưu ${photos.size} trang…"
@@ -106,8 +110,15 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
                     persist(immediate = true)
                 }
                 selectDoc(docId)
+                onComplete?.invoke(docId)
             }
             busy = null
+        }
+    }
+
+    fun cleanSessionCache() {
+        viewModelScope.launch {
+            store.cleanSessionCache(getApplication())
         }
     }
 
