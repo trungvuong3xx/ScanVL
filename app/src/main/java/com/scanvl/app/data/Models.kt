@@ -35,3 +35,12 @@ data class ScanDoc(
 ) {
     val isInTrash: Boolean get() = deletedAt != null
 }
+
+/**
+ * Ảnh được chụp trong phiên quét camera tùy biến
+ */
+data class CapturedPhoto(
+    val id: String = java.util.UUID.randomUUID().toString(),
+    val file: java.io.File,
+    val rotation: Int = 0
+)

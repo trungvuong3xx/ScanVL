@@ -124,8 +124,23 @@ class DocumentStore(context: Context) {
     }
 
     // ---------------------------------------------------------------------
-    // Nhập ảnh từ ML Kit
+    // Nhập ảnh từ Camera tùy biến hoặc ML Kit
     // ---------------------------------------------------------------------
+    suspend fun importCapturedPhotos(docId: String, photos: List<CapturedPhoto>): List<ScanPage> = coroutineScope {
+        val dir = File(docsRoot, docId).apply { mkdirs() }
+        photos.map { photo ->
+            async(imageDispatcher) {
+                val pageId = UUID.randomUUID().toString().substring(0, 12)
+                val dest = File(dir, "$pageId.jpg")
+                if (importOne(Uri.fromFile(photo.file), dest)) {
+                    // Dọn dẹp file tạm trong cache
+                    photo.file.delete()
+                    ScanPage(id = pageId, fileName = dest.name, rotation = photo.rotation)
+                } else null
+            }
+        }.awaitAll().filterNotNull()
+    }
+
     suspend fun importPages(docId: String, uris: List<Uri>): List<ScanPage> = coroutineScope {
         val dir = File(docsRoot, docId).apply { mkdirs() }
         uris.map { uri ->

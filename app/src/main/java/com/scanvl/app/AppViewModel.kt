@@ -12,6 +12,7 @@ import com.scanvl.app.data.DocumentStore
 import com.scanvl.app.data.ExportQuality
 import com.scanvl.app.data.ScanDoc
 import com.scanvl.app.data.ScanPage
+import com.scanvl.app.data.CapturedPhoto
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
@@ -87,8 +88,29 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     // ------------------------------------------------------------------
-    // Nhận kết quả quét
+    // Nhận kết quả quét từ Camera tùy biến hoặc ML Kit
     // ------------------------------------------------------------------
+    fun importCapturedPhotos(photos: List<CapturedPhoto>, targetDocId: String?) {
+        if (photos.isEmpty()) return
+        viewModelScope.launch {
+            busy = "Đang lưu ${photos.size} trang…"
+            val existing = doc(targetDocId)
+            val docId = existing?.id ?: UUID.randomUUID().toString()
+            val pages = store.importCapturedPhotos(docId, photos)
+            if (pages.isNotEmpty()) {
+                if (existing != null) {
+                    editDoc(docId) { it.copy(pages = it.pages + pages) }
+                } else {
+                    val title = "Scan " + SimpleDateFormat("dd-MM HH'h'mm", Locale.getDefault()).format(Date())
+                    docs = listOf(ScanDoc(docId, title, System.currentTimeMillis(), pages)) + docs
+                    persist(immediate = true)
+                }
+                selectDoc(docId)
+            }
+            busy = null
+        }
+    }
+
     /** [targetDocId] = null -> tạo tài liệu mới; khác null -> thêm trang vào tài liệu đó. */
     fun importScan(uris: List<Uri>, targetDocId: String?) {
         if (uris.isEmpty()) return

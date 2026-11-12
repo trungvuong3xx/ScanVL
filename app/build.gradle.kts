@@ -79,6 +79,13 @@ android {
 }
 
 dependencies {
+    // CameraX cho giao diện camera quét tùy biến (Cân bằng điện thoại, Chụp đơn, Chụp hàng loạt)
+    val cameraXVersion = "1.4.0"
+    implementation("androidx.camera:camera-core:$cameraXVersion")
+    implementation("androidx.camera:camera-camera2:$cameraXVersion")
+    implementation("androidx.camera:camera-lifecycle:$cameraXVersion")
+    implementation("androidx.camera:camera-view:$cameraXVersion")
+
     // Google Play Services ML Kit Document Scanner (Chính thức từ Google)
     implementation("com.google.android.gms:play-services-mlkit-document-scanner:16.0.0")
 

@@ -108,6 +108,8 @@ import androidx.compose.ui.unit.dp
 import coil.compose.AsyncImage
 import com.scanvl.app.AppViewModel
 import com.scanvl.app.ScanMode
+import com.scanvl.app.camera.CameraScannerScreen
+import com.scanvl.app.camera.CameraScanTab
 import com.scanvl.app.data.DocumentStore
 import com.scanvl.app.data.ExportQuality
 import com.scanvl.app.data.ScanDoc
@@ -123,19 +125,38 @@ import kotlin.math.ceil
 
 private enum class HomeTab { DOCS, TRASH }
 
+data class CameraSession(val tab: CameraScanTab, val targetDocId: String? = null)
+
 // =====================================================================
 // Gốc ứng dụng: Luồng 3 bước (Scan → Xem lại/chỉnh nhanh → Gửi)
 // =====================================================================
 @Composable
 fun ScanVLApp(
     vm: AppViewModel,
-    onScan: (ScanMode, String?) -> Unit,
+    onScan: (ScanMode, String?) -> Unit = { _, _ -> },
     onSendPdf: (String) -> Unit,
     onSendImages: (String) -> Unit
 ) {
     val snackbar = remember { SnackbarHostState() }
     val scope = rememberCoroutineScope()
     var renameTarget by remember { mutableStateOf<ScanDoc?>(null) }
+    var cameraSession by remember {
+        mutableStateOf(if (vm.autoLaunchCamera) CameraSession(CameraScanTab.BATCH, null) else null)
+    }
+
+    if (cameraSession != null) {
+        BackHandler { cameraSession = null }
+        CameraScannerScreen(
+            initialTab = cameraSession!!.tab,
+            onClose = { cameraSession = null },
+            onFinishScan = { photos ->
+                val targetId = cameraSession?.targetDocId
+                cameraSession = null
+                vm.importCapturedPhotos(photos, targetId)
+            }
+        )
+        return
+    }
 
     fun showUndo(message: String, onUndo: () -> Unit) {
         scope.launch {
@@ -156,8 +177,8 @@ fun ScanVLApp(
         HomeScreen(
             vm = vm,
             snackbar = snackbar,
-            onScanSingle = { onScan(ScanMode.SINGLE, null) },
-            onScanBatch = { onScan(ScanMode.BATCH, null) },
+            onScanSingle = { cameraSession = CameraSession(CameraScanTab.SINGLE, null) },
+            onScanBatch = { cameraSession = CameraSession(CameraScanTab.BATCH, null) },
             onOpen = { vm.selectDoc(it.id) },
             onRename = { renameTarget = it },
             onTrash = { doc ->
@@ -184,7 +205,7 @@ fun ScanVLApp(
             onUndo = { vm.undo() },
             onRedo = { vm.redo() },
             onQualityChange = { vm.updateQuality(it) },
-            onAddPages = { onScan(ScanMode.BATCH, openDoc.id) },
+            onAddPages = { cameraSession = CameraSession(CameraScanTab.BATCH, openDoc.id) },
             onTrashDoc = {
                 vm.moveToTrash(openDoc.id)?.let { trashed ->
                     showUndo("Đã chuyển \"${trashed.title}\" vào Thùng rác") {

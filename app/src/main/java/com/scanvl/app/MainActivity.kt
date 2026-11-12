@@ -92,13 +92,8 @@ class MainActivity : ComponentActivity() {
             }
         }
 
-        // Nguyên tắc cốt lõi #1: Mở app là vào thẳng camera (chỉ kích hoạt 1 lần khi cold start nếu bật tùy chọn)
-        if (!autoLaunchedThisSession && vm.autoLaunchCamera) {
-            autoLaunchedThisSession = true
-            startScan(ScanMode.BATCH, null)
-        } else {
-            prefetchAll()
-        }
+        // Camera tùy biến được Compose ScanVLApp tự khởi chạy nếu bật tùy chọn 'Vào thẳng Cam'
+        prefetchAll()
     }
 
     override fun onSaveInstanceState(outState: Bundle) {
