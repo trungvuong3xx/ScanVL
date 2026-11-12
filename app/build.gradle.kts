@@ -7,9 +7,8 @@ plugins {
 // Số build tăng dần trên GitHub Actions -> mỗi APK mới cài đè (update) lên bản cũ được
 val ciBuildNumber: Int = System.getenv("GITHUB_RUN_NUMBER")?.toIntOrNull() ?: 1
 
-// Thông tin keystore ký bản Release (lấy từ biến môi trường / GitHub Secrets)
-val releaseKeystorePath: String? = System.getenv("KEYSTORE_PATH")
-val hasReleaseKeystore: Boolean = releaseKeystorePath != null && file(releaseKeystorePath).exists()
+// Khóa ký cố định trong dự án để đồng bộ 100% giữa máy tính và GitHub Actions
+val releaseKeystoreFile = rootProject.file("keystore/scanvl-release.jks")
 
 android {
     namespace = "com.scanvl.app"
@@ -17,11 +16,11 @@ android {
 
     signingConfigs {
         create("release") {
-            if (hasReleaseKeystore) {
-                storeFile = file(releaseKeystorePath!!)
-                storePassword = System.getenv("KEYSTORE_PASSWORD")
-                keyAlias = System.getenv("KEY_ALIAS")
-                keyPassword = System.getenv("KEY_PASSWORD")
+            if (releaseKeystoreFile.exists()) {
+                storeFile = releaseKeystoreFile
+                storePassword = "S5reEGbWMsHL9aTXki28"
+                keyAlias = "scanvl"
+                keyPassword = "S5reEGbWMsHL9aTXki28"
             }
         }
     }
@@ -44,8 +43,7 @@ android {
             // R8: thu gọn + tối ưu code -> APK nhẹ, chạy mượt hơn bản debug rất nhiều
             isMinifyEnabled = true
             isShrinkResources = true
-            // Có keystore thì ký bằng keystore riêng, không có thì tạm ký bằng debug key để vẫn cài được
-            signingConfig = if (hasReleaseKeystore) {
+            signingConfig = if (releaseKeystoreFile.exists()) {
                 signingConfigs.getByName("release")
             } else {
                 signingConfigs.getByName("debug")

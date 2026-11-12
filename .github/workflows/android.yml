@@ -25,23 +25,7 @@ jobs:
       - name: Setup Gradle (cache)
         uses: gradle/actions/setup-gradle@v4
 
-      - name: Decode release keystore
-        env:
-          KEYSTORE_BASE64: ${{ secrets.KEYSTORE_BASE64 }}
-        run: |
-          if [ -n "$KEYSTORE_BASE64" ]; then
-            echo "$KEYSTORE_BASE64" | base64 --decode > "$RUNNER_TEMP/release.jks"
-            echo "KEYSTORE_PATH=$RUNNER_TEMP/release.jks" >> "$GITHUB_ENV"
-            echo "Đã nạp keystore release."
-          else
-            echo "::warning::Chưa cấu hình secret KEYSTORE_BASE64 -> APK được ký bằng debug key tạm thời (không cài đè được giữa các lần build)."
-          fi
-
       - name: Build Release APK
-        env:
-          KEYSTORE_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD }}
-          KEY_ALIAS: ${{ secrets.KEY_ALIAS }}
-          KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
         run: |
           chmod +x ./gradlew
           ./gradlew assembleRelease --no-daemon --stacktrace
